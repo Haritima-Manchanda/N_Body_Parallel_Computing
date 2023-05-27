@@ -25,35 +25,35 @@ __global__ void initializeAccels(vector3 **accels, vector3 *values, int numEntit
 
 // CUDA kernel to compute pairwise accelerations
 __global__ void computeAccels(vector3** accels, vector3* hPos, double* mass) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    int j;
-    vector3 distance;
-    double magnitude_sq, magnitude, accelmag;
-    if (i < NUMENTITIES) {
-        for (j = 0; j < NUMENTITIES; j++) {
-            if (i == j) {
-                FILL_VECTOR(accels[i][j], 0, 0, 0);
-            } else {
-                for (int k = 0; k < 3; k++) {
-                    distance[k] = hPos[i][k] - hPos[j][k];
-                }
-                magnitude_sq = distance[0] * distance[0] + distance[1] * distance[1] + distance[2] * distance[2];
-                magnitude = sqrt(magnitude_sq);
-                accelmag = -1 * GRAV_CONSTANT * mass[j] / magnitude_sq;
-                FILL_VECTOR(accels[i][j], accelmag * distance[0] / magnitude, accelmag * distance[1] / magnitude, accelmag * distance[2] / magnitude);
+    
+    int i = blockDim.y * blockIdx.y + threadIdx.y;
+    int j = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (i < NUMENTITIES && j < NUMENTITIES) {
+        if (i == j) {
+            FILL_VECTOR(accels[i][j], 0, 0, 0);
+        } else {
+            vector3 distance;
+            for (int l = 0; l < 3; l++) {
+                distance[l] = hPos[i][l] - hPos[j][l];
             }
+            double magnitude_sq = distance[0] * distance[0] + distance[1] * distance[1] + distance[2] * distance[2];
+            double magnitude = sqrt(magnitude_sq);
+            double accelmag = -1 * GRAV_CONSTANT * mass[j] / magnitude_sq;
+            FILL_VECTOR(accels[i][j], accelmag * distance[0] / magnitude, accelmag * distance[1] / magnitude, accelmag * distance[2] / magnitude);
         }
     }
+
 }
 
 // CUDA kernel to sum up the rows of the acceleration matrix
 __global__ void sumAccels(vector3** accels, vector3* accel_sum) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int k= blockIdx.y;
     if (i < NUMENTITIES) {
+	FILL_VECTOR(accel_sum[i], 0, 0, 0);
         for (int j = 0; j < NUMENTITIES; j++) {
-            for (int k = 0; k < 3; k++) {
                 accel_sum[i][k] += accels[i][j][k];
-            }
         }
     }
 }
@@ -61,11 +61,10 @@ __global__ void sumAccels(vector3** accels, vector3* accel_sum) {
 // CUDA kernel to update velocity and position
 __global__ void updateVelPos(vector3* hVel, vector3* hPos, vector3* accel_sum) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int k= blockIdx.y;
     if (i < NUMENTITIES) {
-        for (int k = 0; k < 3; k++) {
             hVel[i][k] += accel_sum[i][k] * INTERVAL;
             hPos[i][k] += hVel[i][k] * INTERVAL;
-        }
     }
 }
 
@@ -115,7 +114,7 @@ void planetFill(){
 //Side Effects: Fills count entries in our system starting at index start (0 based)
 void randomFill(int start, int count)
 {
-	int i, j;// c = start;
+	int i, j;
 	for (i = start; i < start + count; i++)
 	{
 		for (j = 0; j < 3; j++)
@@ -144,13 +143,15 @@ void printSystem(FILE* handle){
 		}
 		fprintf(handle,"),m=%lf\n",mass[i]);
 	}
+
+	printf("\n");
 }
 
 int main(int argc, char **argv)
 {
 	clock_t t0=clock();
 	int t_now;
-	//srand(time(NULL));
+	
 	srand(1234);
 	initHostMemory(NUMENTITIES);
 	planetFill();
@@ -173,27 +174,29 @@ int main(int argc, char **argv)
 
 	int threads_per_block = 256;
     	int num_blocks = (NUMENTITIES + threads_per_block - 1) / threads_per_block;
-	
+	dim3 blockSize(16, 16, 1);
+        dim3 gridSize((NUMENTITIES + blockSize.x - 1) / blockSize.x, (NUMENTITIES + blockSize.y - 1) / blockSize.y, 1);
+
 	vector3 *d_values;
 	cudaMalloc((void **)&d_values, sizeof(vector3)*NUMENTITIES*NUMENTITIES);
+	
 	vector3 **d_accels;
 	cudaMalloc((void ***)&d_accels, sizeof(vector3*)*NUMENTITIES);
+	
 	initializeAccels<<<num_blocks, threads_per_block>>>(d_accels, d_values, NUMENTITIES);
 	cudaDeviceSynchronize();
 	
-	vector3 h_accel_sum = {0, 0, 0};
 	vector3* d_accel_sum;
-	cudaMalloc((void **)&d_accel_sum, sizeof(vector3));
-
-	
+	cudaMalloc((void **)&d_accel_sum, NUMENTITIES * sizeof(vector3));
+	dim3 wideblock(num_blocks,3);
 	// Call Kernal function for each INTERVAL
 	for(t_now = 0; t_now < DURATION; t_now+= INTERVAL){
-		computeAccels<<<num_blocks, threads_per_block>>>(d_accels, d_hpos, d_mass);
-
-		cudaMemcpy(d_accel_sum, &h_accel_sum, sizeof(vector3), cudaMemcpyHostToDevice);
-
-		sumAccels<<<num_blocks, threads_per_block>>>(d_accels, d_accel_sum);
-		updateVelPos<<<num_blocks, threads_per_block>>>(d_hvel, d_hpos, d_accel_sum);		
+		computeAccels<<<gridSize, blockSize>>>(d_accels, d_hpos, d_mass);
+			
+		sumAccels<<<wideblock, threads_per_block>>>(d_accels, d_accel_sum);
+		
+		updateVelPos<<<wideblock, threads_per_block>>>(d_hvel, d_hpos, d_accel_sum);
+				
 	}
 
 	// Copying data from device to host
@@ -218,3 +221,4 @@ int main(int argc, char **argv)
 
 	freeHostMemory();
 }
+
