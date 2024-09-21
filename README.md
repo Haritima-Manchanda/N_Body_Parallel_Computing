@@ -1,4 +1,3 @@
-# cisc372_nbody
 Converts the serial implementation of a solution to the nbody problem (nbody.c) to a parallelized version (nbody.cu) using CUDA.
 
 The program greatly increases performance by utilizing the processing power of a GPU.
